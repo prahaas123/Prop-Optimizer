@@ -1,5 +1,6 @@
 import os
 import glob
+import re
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -76,21 +77,20 @@ def main():
     plt.show()
 
 def characterize_motor(csv_path):
+    # Equation: Voltage = (1/Kv) * RPM + Rm * Current
     df = pd.read_csv(csv_path)
+    df = df[df['rpm'] > 0]
+    Y = df['voltage_V'].values
+    X = np.column_stack((df['rpm'].values, df['current_A'].values))
+    coefficients, residuals, rank, s = np.linalg.lstsq(X, Y, rcond=None)
+    Kv = 1.0 / coefficients[0]
+    Rm = coefficients[1]
     
-    # Y = X * Beta, Y = RPM, X1 = Voltage, X2 = -Current
-    Y = df['rpm'].values
-    X = np.column_stack((df['voltage_V'].values, -df['current_A'].values))
-    
-    # Least squares fit
-    Beta, _, _, _ = np.linalg.lstsq(X, Y, rcond=None)
-    
-    Kv = Beta[0]
-    Rm = Beta[1] / Kv
-    I0 = 0.5  # Approximate No-Load Current (Amps)
+    # Standard estimates for missing data
+    I0 = 0.5  # Approximate No-Load Current (Amps) if not in CSV
     Kt = 60.0 / (2.0 * np.pi * Kv) # Torque constant (Nm/A)
     
-    print(f"--- Motor Characterization ---")
+    print(f"--- Motor Characterization (MATLAB Imitation) ---")
     print(f"Fitted Kv: {Kv:.1f} RPM/V")
     print(f"Fitted Rm: {Rm:.4f} Ohms")
     print(f"Calc Kt:   {Kt:.4f} Nm/A\n")
@@ -108,16 +108,13 @@ def parse_apc_directory(directory, d_range, p_range):
     for filepath in filepaths:
         filename = os.path.basename(filepath)
         
-        try:
-            clean_name = ''.join([c if c.isdigit() or c == '.' else ' ' for c in filename])
-            parts = [float(x) for x in clean_name.split() if x]
-            if len(parts) >= 2:
-                D_in, P_in = parts[0], parts[1]
-            else:
-                continue
-        except:
+        match = re.search(r'(\d+(?:\.\d+)?)[xX](\d+(?:\.\d+)?)', filename)
+        if not match:
             continue
             
+        D_in = float(match.group(1))
+        P_in = float(match.group(2))
+        
         if not (d_range[0] <= D_in <= d_range[1] and p_range[0] <= P_in <= p_range[1]):
             continue
             
@@ -128,7 +125,7 @@ def parse_apc_directory(directory, d_range, p_range):
             J_vals, Ct_vals, Cp_vals = [], [], []
             for line in lines:
                 cols = line.split()
-                if len(cols) >= 7:
+                if len(cols) >= 5:
                     try:
                         j  = float(cols[1]) # Advance Ratio
                         ct = float(cols[3]) # Thrust Coeff
@@ -140,19 +137,22 @@ def parse_apc_directory(directory, d_range, p_range):
                         continue
             
             if len(J_vals) > 5:
+                # Group by rounded Advance Ratio to ensure monotonic arrays for interpolation
                 df = pd.DataFrame({'J': J_vals, 'Ct': Ct_vals, 'Cp': Cp_vals})
-                df = df.groupby('J').mean().reset_index()
+                df['J_round'] = df['J'].round(3)
+                df = df.groupby('J_round').mean().reset_index()
+                df = df.sort_values('J_round')
                 
                 props.append({
                     'name': filename.replace('.dat', ''),
-                    'D_m': D_in * 0.0254,  # Convert inches to meters
+                    'D_m': D_in * 0.0254,  
                     'D_in': D_in,
                     'P_in': P_in,
-                    'J': df['J'].values,
+                    'J': df['J_round'].values,
                     'Ct': df['Ct'].values,
                     'Cp': df['Cp'].values
                 })
-        except Exception as e:
+        except Exception:
             pass
             
     return props
